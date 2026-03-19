@@ -1,20 +1,28 @@
 #!/usr/bin/env bash
-# hl-tutor: Launch a tmux coding tutor session
-# Usage: ./setup.sh [project-dir]
+# hl-tutor: Launch a coding tutor tmux session
 #
-# Left pane  = Student terminal (they type here)
-# Right pane = AI Tutor (Claude Code with tutor prompt)
+# Left pane  = Student terminal (~/tutor-workspace)
+# Right pane = AI Tutor (Claude Code with rich prompt + memory)
+#
+# Features from guided-AI-coding:
+#   - Rich TUTOR_PROMPT with curriculum, pacing, verification
+#   - Persistent memory (progress.md + lessons-learned.md)
+#   - Pane ID resolution into the prompt (${STUDENT_PANE}, etc.)
+#   - SessionStart hook so tutor role survives auto-compact/restart
+#   - CLAUDE_CONFIG_DIR isolation (no global ~/.claude/CLAUDE.md bleed)
 
 set -euo pipefail
 
 SESSION="hl-tutor"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROMPT_FILE="$SCRIPT_DIR/TUTOR_PROMPT.md"
-PROJECT_DIR="${1:-$HOME/my-project}"
+TUTOR_WORKSPACE="$HOME/tutor-workspace"
+PROMPTS_SRC="$SCRIPT_DIR"
+MEMORY_SRC="$SCRIPT_DIR/tutor/memory"
+HOOKS_SRC="$SCRIPT_DIR/tutor-hooks"
 
-# ── Preflight checks ─────────────────────────────────────────────
+# ── Preflight checks ──────────────────────────────────────────────────────────
 if ! command -v tmux &>/dev/null; then
-    echo "Error: tmux is not installed. Install it first:"
+    echo "Error: tmux is not installed."
     echo "  brew install tmux    # macOS"
     echo "  sudo apt install tmux  # Linux"
     exit 1
@@ -26,53 +34,100 @@ if ! command -v claude &>/dev/null; then
     exit 1
 fi
 
-if [ ! -f "$PROMPT_FILE" ]; then
-    echo "Error: Tutor prompt not found at $PROMPT_FILE"
-    exit 1
-fi
-
-# ── Kill existing session if any ──────────────────────────────────
+# ── Kill existing session if any ──────────────────────────────────────────────
 if tmux has-session -t "$SESSION" 2>/dev/null; then
     echo "Session '$SESSION' already exists. Killing it..."
     tmux kill-session -t "$SESSION"
 fi
 
-# ── Create project directory & inject CLAUDE.md ───────────────────
-mkdir -p "$PROJECT_DIR"
+# ── Provision tutor workspace ─────────────────────────────────────────────────
+echo "Provisioning tutor workspace at $TUTOR_WORKSPACE..."
+mkdir -p "$TUTOR_WORKSPACE"/{prompts,projects}
+mkdir -p "$TUTOR_WORKSPACE/.claude/hooks"
 
-# Copy the tutor prompt as CLAUDE.md so Claude Code auto-loads it
-cp "$PROMPT_FILE" "$PROJECT_DIR/CLAUDE.md"
+# Copy prompts (always refresh from source)
+cp "$PROMPTS_SRC/TUTOR_PROMPT.md" "$TUTOR_WORKSPACE/prompts/TUTOR_PROMPT.md"
+cp "$PROMPTS_SRC/CURRICULUM.md"   "$TUTOR_WORKSPACE/prompts/CURRICULUM.md"
 
-# ── Build the tmux session ────────────────────────────────────────
-# Create session with the student terminal (left pane)
-tmux new-session -d -s "$SESSION" -c "$PROJECT_DIR" -x 200 -y 50
+# Copy hooks (always refresh from source)
+cp "$HOOKS_SRC/session_start_tutor.py" "$TUTOR_WORKSPACE/.claude/hooks/session_start_tutor.py"
+chmod +x "$TUTOR_WORKSPACE/.claude/hooks/session_start_tutor.py"
+
+# Migrate memory: only initialize on fresh start, preserve existing progress
+if [ ! -f "$TUTOR_WORKSPACE/memory/progress.md" ]; then
+    echo "Initializing fresh tutor memory..."
+    mkdir -p "$TUTOR_WORKSPACE/memory"
+    cp "$MEMORY_SRC/progress.md"       "$TUTOR_WORKSPACE/memory/progress.md"
+    cp "$MEMORY_SRC/lessons-learned.md" "$TUTOR_WORKSPACE/memory/lessons-learned.md"
+else
+    echo "Existing tutor memory found — preserving student progress."
+fi
+
+# Isolated Claude config: prevents global ~/.claude/CLAUDE.md from bleeding in
+TUTOR_CLAUDE_CONFIG="$TUTOR_WORKSPACE/.claude-config"
+mkdir -p "$TUTOR_CLAUDE_CONFIG/commands"
+# Bring in the hooks settings (not the global CLAUDE.md)
+cp "$HOOKS_SRC/settings.json" "$TUTOR_CLAUDE_CONFIG/settings.json"
+# Copy /ecp command if available (used to load prompts in Claude Code)
+cp ~/.claude/commands/ecp.md "$TUTOR_CLAUDE_CONFIG/commands/" 2>/dev/null || true
+
+# ── Create tmux session ───────────────────────────────────────────────────────
+echo "Creating tmux session '$SESSION'..."
+tmux new-session -d -s "$SESSION" -c "$TUTOR_WORKSPACE" -x 220 -y 50
 
 # Enable mouse support (click panes, scroll, resize)
 tmux set-option -t "$SESSION" -g mouse on
 
-# Student pane: clean welcome
-tmux send-keys -t "$SESSION:0.0" "clear && printf '\\n  Welcome! This is YOUR terminal.\\n  Your tutor is on the right side -->\\n  Type commands here. Experiment freely!\\n\\n'" Enter
+# Student pane (left): bash welcome
+tmux send-keys -t "$SESSION:0.0" \
+    "clear && printf '\\n  Welcome! This is YOUR terminal.\\n  Your tutor is on the right -->\\n  Start by saying hi!\\n\\n'" \
+    Enter
 
-# Split: right pane for the tutor (40% width)
-tmux split-window -h -t "$SESSION:0.0" -c "$PROJECT_DIR" -p 40
+# Split: right pane for tutor (40% width)
+tmux split-window -h -t "$SESSION:0.0" -c "$TUTOR_WORKSPACE" -p 40
 
-# Launch Claude Code in the right pane
-# Uses CLAUDE.md for the system prompt (auto-loaded by Claude Code)
-# --append-system-prompt adds the session-specific context
-tmux send-keys -t "$SESSION:0.1" "claude --append-system-prompt 'You are now live in the hl-tutor tmux session. The student is in pane 0 (left). You are in pane 1 (right). To see their terminal: tmux capture-pane -t hl-tutor:0.0 -p -S -50. Their project directory is $PROJECT_DIR. Start by introducing yourself and asking their name.'" Enter
+# ── Resolve pane IDs into tutor prompt ───────────────────────────────────────
+STUDENT_PANE=$(tmux list-panes -t "$SESSION:0" -F "#{pane_id}" | sed -n '1p')
+TUTOR_PANE=$(tmux list-panes -t "$SESSION:0" -F "#{pane_id}" | sed -n '2p')
 
-# Focus the student pane (left) so student starts there
+echo "Pane IDs:  STUDENT=$STUDENT_PANE  TUTOR=$TUTOR_PANE"
+
+RESOLVED_PROMPT="$TUTOR_WORKSPACE/prompts/.TUTOR_PROMPT_RESOLVED.md"
+cp "$TUTOR_WORKSPACE/prompts/TUTOR_PROMPT.md" "$RESOLVED_PROMPT"
+
+# Substitute placeholders (perl works identically on macOS and Linux)
+perl -i -pe "s|\\\${STUDENT_PANE}|$STUDENT_PANE|g" "$RESOLVED_PROMPT"
+perl -i -pe "s|\\\${TUTOR_PANE}|$TUTOR_PANE|g"     "$RESOLVED_PROMPT"
+perl -i -pe "s|\\\${PROJECT_ROOT}|$SCRIPT_DIR|g"    "$RESOLVED_PROMPT"
+
+# ── Generate tutor launcher script ───────────────────────────────────────────
+# A wrapper script avoids all quoting issues when passing the prompt via tmux
+LAUNCHER="$TUTOR_WORKSPACE/.launch-tutor.sh"
+cat > "$LAUNCHER" << LAUNCHER_EOF
+#!/usr/bin/env bash
+# Auto-generated by setup.sh — do not edit manually
+cd "$TUTOR_WORKSPACE"
+PROMPT_CONTENT="\$(cat '$RESOLVED_PROMPT')"
+exec env CLAUDE_CONFIG_DIR="$TUTOR_CLAUDE_CONFIG" claude --append-system-prompt "\$PROMPT_CONTENT"
+LAUNCHER_EOF
+chmod +x "$LAUNCHER"
+
+# ── Start tutor Claude Code in right pane ────────────────────────────────────
+tmux send-keys -t "$SESSION:0.1" "$LAUNCHER" Enter
+
+# Focus the student pane so they start there
 tmux select-pane -t "$SESSION:0.0"
 
-# ── Attach ────────────────────────────────────────────────────────
+# ── Attach ────────────────────────────────────────────────────────────────────
 echo ""
 echo "  hl-tutor is starting..."
 echo ""
-echo "  Left pane:  Your terminal (type here)"
+echo "  Left pane:  Your terminal (start here)"
 echo "  Right pane: Your AI tutor"
-echo "  Project dir: $PROJECT_DIR"
+echo "  Workspace:  $TUTOR_WORKSPACE"
+echo "  Memory:     $TUTOR_WORKSPACE/memory/"
 echo ""
-echo "  To reattach later: tmux attach -t hl-tutor"
+echo "  To reattach later: tmux attach -t $SESSION"
 echo ""
 
 tmux attach-session -t "$SESSION"
