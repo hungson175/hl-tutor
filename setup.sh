@@ -47,6 +47,9 @@ cp "$PROMPT_FILE" "$PROJECT_DIR/CLAUDE.md"
 # Create session with the student terminal (left pane)
 tmux new-session -d -s "$SESSION" -c "$PROJECT_DIR" -x 200 -y 50
 
+# Enable mouse support (click panes, scroll, resize)
+tmux set-option -t "$SESSION" -g mouse on
+
 # Student pane: clean welcome
 tmux send-keys -t "$SESSION:0.0" "clear && printf '\\n  Welcome! This is YOUR terminal.\\n  Your tutor is on the right side -->\\n  Type commands here. Experiment freely!\\n\\n'" Enter
 
