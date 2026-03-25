@@ -14,25 +14,154 @@
 set -euo pipefail
 
 SESSION="hl-tutor"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE_PATH="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE_PATH" ]; do
+	SOURCE_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
+	SOURCE_PATH="$(readlink "$SOURCE_PATH")"
+	case "$SOURCE_PATH" in
+	/*) ;;
+	*) SOURCE_PATH="$SOURCE_DIR/$SOURCE_PATH" ;;
+	esac
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
 TUTOR_WORKSPACE="$HOME/tutor-workspace"
 PROMPTS_SRC="$SCRIPT_DIR"
 MEMORY_SRC="$SCRIPT_DIR/tutor/memory"
 HOOKS_SRC="$SCRIPT_DIR/tutor-hooks"
+TUTOR_CMD_PATH="$HOME/.local/bin/tutor"
+APT_UPDATED=0
 
-# ── Preflight checks ──────────────────────────────────────────────────────────
-if ! command -v tmux &>/dev/null; then
-	echo "Error: tmux is not installed."
-	echo "  brew install tmux    # macOS"
-	echo "  sudo apt install tmux  # Linux"
-	exit 1
-fi
+log() {
+	echo "[setup] $1"
+}
 
-if ! command -v claude &>/dev/null; then
-	echo "Error: claude (Claude Code CLI) is not installed."
-	echo "  npm install -g @anthropic-ai/claude-code"
-	exit 1
-fi
+shell_profile_path() {
+	case "${SHELL:-}" in
+	*/zsh) echo "${ZDOTDIR:-$HOME}/.zprofile" ;;
+	*/bash) echo "$HOME/.bash_profile" ;;
+	*) echo "$HOME/.profile" ;;
+	esac
+}
+
+append_line_if_missing() {
+	local line="$1"
+	local file="$2"
+	mkdir -p "$(dirname "$file")"
+	touch "$file"
+	grep -Fqx "$line" "$file" 2>/dev/null || printf '\n%s\n' "$line" >>"$file"
+}
+
+ensure_tutor_command() {
+	mkdir -p "$HOME/.local/bin"
+	ln -sf "$SCRIPT_DIR/setup.sh" "$TUTOR_CMD_PATH"
+	append_line_if_missing 'export PATH="$HOME/.local/bin:$PATH"' "$(shell_profile_path)"
+	export PATH="$HOME/.local/bin:$PATH"
+}
+
+ensure_xcode_command_line_tools() {
+	local trigger_file product_label waited_seconds=0
+	[ "$(uname -s)" = "Darwin" ] || return 0
+	xcode-select -p >/dev/null 2>&1 && return 0
+	log "Installing Xcode Command Line Tools..."
+	trigger_file="/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress"
+	touch "$trigger_file"
+	product_label="$(softwareupdate -l 2>/dev/null | grep -E '^\*.*Command Line Tools' | tail -n 1 | sed 's/^[^C]*//')"
+	[ -n "$product_label" ] || {
+		rm -f "$trigger_file"
+		echo "Error: unable to find Xcode Command Line Tools in softwareupdate." >&2
+		exit 1
+	}
+	sudo softwareupdate -i "$product_label" --verbose
+	rm -f "$trigger_file"
+	until xcode-select -p >/dev/null 2>&1; do
+		sleep 5
+		waited_seconds=$((waited_seconds + 5))
+		[ "$waited_seconds" -lt 1800 ] || {
+			echo "Error: timed out waiting for Xcode Command Line Tools." >&2
+			exit 1
+		}
+	done
+}
+
+brew_bin_path() {
+	[ -x /opt/homebrew/bin/brew ] && echo /opt/homebrew/bin/brew && return 0
+	[ -x /usr/local/bin/brew ] && echo /usr/local/bin/brew && return 0
+	return 1
+}
+
+ensure_homebrew() {
+	local brew_bin brew_shellenv_line
+	[ "$(uname -s)" = "Darwin" ] || return 0
+	brew_bin="$(command -v brew 2>/dev/null || brew_bin_path || true)"
+	[ -n "$brew_bin" ] || {
+		log "Installing Homebrew..."
+		NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+		brew_bin="$(brew_bin_path)"
+	}
+	brew_shellenv_line="eval \"\$(${brew_bin} shellenv)\""
+	append_line_if_missing "$brew_shellenv_line" "$(shell_profile_path)"
+	eval "$(${brew_bin} shellenv)"
+}
+
+apt_install() {
+	command -v apt-get >/dev/null 2>&1 || {
+		echo "Error: automatic installs only support Homebrew on macOS or apt-get on Linux." >&2
+		exit 1
+	}
+	if [ "$APT_UPDATED" -eq 0 ]; then
+		sudo apt-get update
+		APT_UPDATED=1
+	fi
+	sudo apt-get install -y "$@"
+}
+
+ensure_package_command() {
+	local command_name="$1"
+	local package_name="$2"
+	command -v "$command_name" >/dev/null 2>&1 && return 0
+	log "Installing $package_name..."
+	case "$(uname -s)" in
+	Darwin) ensure_homebrew && brew install "$package_name" ;;
+	Linux) apt_install "$package_name" ;;
+	*)
+		echo "Error: unsupported OS $(uname -s)." >&2
+		exit 1
+		;;
+	esac
+}
+
+ensure_node_and_npm() {
+	if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+		return 0
+	fi
+	log "Installing Node.js..."
+	case "$(uname -s)" in
+	Darwin) ensure_homebrew && brew install node ;;
+	Linux) apt_install nodejs npm ;;
+	*)
+		echo "Error: unsupported OS $(uname -s)." >&2
+		exit 1
+		;;
+	esac
+}
+
+ensure_dependencies() {
+	ensure_xcode_command_line_tools
+	ensure_homebrew
+	ensure_package_command git git
+	ensure_package_command tmux tmux
+	ensure_node_and_npm
+	if ! command -v claude >/dev/null 2>&1; then
+		log "Installing Claude Code CLI..."
+		case "$(uname -s)" in
+		Linux) sudo npm install -g @anthropic-ai/claude-code ;;
+		*) npm install -g @anthropic-ai/claude-code ;;
+		esac
+	fi
+	ensure_tutor_command
+}
+
+ensure_dependencies
 
 # ── Kill existing session if any ──────────────────────────────────────────────
 if tmux has-session -t "$SESSION" 2>/dev/null; then
@@ -130,8 +259,10 @@ echo "  Left pane:  Your terminal (start here)"
 echo "  Right pane: Your AI tutor"
 echo "  Workspace:  $TUTOR_WORKSPACE"
 echo "  Memory:     $TUTOR_WORKSPACE/memory/"
+echo "  Command:    tutor"
 echo ""
 echo "  To reattach later: tmux attach -t $SESSION"
+echo "  To launch later:   tutor"
 echo ""
 
 tmux attach-session -t "$SESSION"

@@ -12,37 +12,25 @@ The tutor guides students from zero knowledge through terminal basics, HTML, CSS
 
 ## Prerequisites
 
-The user needs these installed before you can run setup:
+`setup.sh` now auto-checks and installs the required tooling when possible.
 
-| Tool | Install command (macOS) | Install command (Linux) |
-|------|------------------------|------------------------|
-| **tmux** | `brew install tmux` | `sudo apt install tmux` |
-| **Claude Code** | `npm install -g @anthropic-ai/claude-code` | `npm install -g @anthropic-ai/claude-code` |
-| **Node.js** (for Claude Code) | `brew install node` | `sudo apt install nodejs npm` |
+- **macOS**: Xcode Command Line Tools, Homebrew, git, tmux, Node.js, and Claude Code are installed automatically if missing.
+- **Linux (apt-based)**: git, tmux, Node.js/npm, and Claude Code are installed automatically if missing.
+- The script also installs a global `tutor` command at `~/.local/bin/tutor` and adds `~/.local/bin` to your shell profile if needed.
 
 ## Setup & Run
 
-**Step 1**: Check prerequisites. Run these and verify they succeed:
-```bash
-tmux -V
-claude --version
-```
-
-If either is missing, install it using the table above.
-
-**Step 2**: Make the setup script executable and run it:
+**Step 1**: Make the setup script executable and run it:
 ```bash
 chmod +x setup.sh
 ./setup.sh
 ```
 
-That's it. The tmux session will launch and the tutor will introduce itself to the student.
+That's it. The script bootstraps missing dependencies, creates the global `tutor` command, launches the tmux session, automatically attaches you to it, and the tutor introduces itself to the student.
 
-### Optional: Custom project directory
-
-By default the student's project lives at `~/my-project`. To use a different directory:
+After the first run you can start it again with:
 ```bash
-./setup.sh /path/to/custom-dir
+tutor
 ```
 
 ### Reattaching to an existing session
@@ -54,10 +42,11 @@ tmux attach -t hl-tutor
 
 ## How It Works
 
-1. `setup.sh` creates a tmux session called `hl-tutor`
-2. It copies `TUTOR_PROMPT.md` into the project directory as `CLAUDE.md` so Claude Code auto-loads it as its system prompt
-3. It splits the terminal: student on the left, Claude Code tutor on the right
-4. The tutor can observe the student's terminal via `tmux capture-pane` and guide them step by step
+1. `setup.sh` bootstraps missing dependencies and installs the global `tutor` launcher.
+2. It creates a tmux session called `hl-tutor`.
+3. It resolves the tutor prompt into `~/tutor-workspace/prompts/.TUTOR_PROMPT_RESOLVED.md` and launches Claude Code with that prompt appended as its system prompt.
+4. It splits the terminal: student on the left, Claude Code tutor on the right.
+5. The tutor can observe the student's terminal via `tmux capture-pane` and guide them step by step.
 
 ## Files
 
