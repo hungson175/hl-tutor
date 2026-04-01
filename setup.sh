@@ -444,7 +444,7 @@ LAUNCHER_EOF
 	echo ""
 	echo "  To reattach later: tmux attach -t $SESSION"
 	echo "  To launch later:   tutor"
-	echo "  If tutor/claude are missing in old shells after detach, run: exec $SHELL -l"
+	echo "  If 'tutor'/'claude' are not found after detach: exec \$SHELL -l"
 	echo ""
 
 	tmux attach-session -t "$SESSION"
@@ -454,6 +454,8 @@ run_install_mode() {
 	bootstrap_repo_checkout "$@"
 	ensure_dependencies
 	launch_tutor_session
+	log "Install complete — reloading shell to activate 'tutor' command..."
+	exec "${SHELL:-/bin/bash}" -l
 }
 
 run_tutor_mode() {
